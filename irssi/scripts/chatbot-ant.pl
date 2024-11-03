@@ -27,13 +27,20 @@ my $ratelimit_count = 0;
 sub on_msg {
 	my ($server, $msg, $nick, $address, $target) = @_;
 	my $channel = $server->channel_find($target);
-	my $chan_name = $channel->{name};
-	my $mynick = $server->{nick};
 	my $isprivate = !defined $channel;
-	my $dst = $isprivate ? $nick : $channel->{name};
+	my $chan_name = $isprivate ? $nick : $channel->{name};
+	my $mynick = $server->{nick};
 	my $request;
 
 	return if grep {lc eq lc $nick} split(/ /, Irssi::settings_get_str('chatbot_ant_ignore'));
+
+	$contexts{$server->{tag}} = {} unless defined $contexts{$server->{tag}};
+	$contexts{$server->{tag}}{$chan_name} = [] unless defined $contexts{$server->{tag}}{$chan_name};
+	push @{$contexts{$server->{tag}}{$chan_name}}, {"role" => (lc $nick eq lc $mynick ? "assistant" : "user"), "content" => "<$nick> $msg"};
+	my $h = Irssi::settings_get_int('chatbot_ant_history_size');
+	if (@{$contexts{$server->{tag}}{$chan_name}} > $h) {
+		splice @{$contexts{$server->{tag}}{$chan_name}}, 0, @{$contexts{$server->{tag}}{$chan_name}} - $h;
+	}
 
 	if ($msg !~ s/^\s*$mynick[,:]\s*(.*)$/$1/i) {
 		return;
@@ -46,21 +53,13 @@ sub on_msg {
 		$system_prompt = "You are IRC user $mynick and you are known for your sharp sarcasm and cynical, dry, rough sense of humor. You are also extremely clever. You will follow up to the last message, play along (address the topic, not the speaker), and say a single surprisingly witty comeback message that makes everyone chuckle. (V češtině tykáš, but you reply in the same language as last message. Address whoever was talking to you.";
 	}
 
-	$contexts{$server->{tag}} = {} unless defined $contexts{$server->{tag}};
-	$contexts{$server->{tag}}{$chan_name} = [] unless defined $contexts{$server->{tag}}{$chan_name};
-	push @{$contexts{$server->{tag}}{$chan_name}}, {"role" => (lc $nick eq lc $mynick ? "assistant" : "user"), "content" => "<$nick> $msg"};
-	my $h = Irssi::settings_get_int('chatbot_ant_history_size');
-	if (@{$contexts{$server->{tag}}{$chan_name}} > $h) {
-		splice @{$contexts{$server->{tag}}{$chan_name}}, 0, @{$contexts{$server->{tag}}{$chan_name}} - $h;
-	}
-
 	# Simple ratelimiting algorithm - at most x messages per 10 minutes
 	my $rate = Irssi::settings_get_int('chatbot_ant_rate');
 	if ($rate > 0) {
 		my $now = time();
 		if ($now < $ratelimit_time) {
 			if ($ratelimit_count >= $rate) {
-				$server->send_message($dst, "$nick: Slow down a little, will you? (rate limiting)", 0);
+				$server->send_message($chan_name, "$nick: Slow down a little, will you? (rate limiting)", 0);
 				return;
 			}
 			$ratelimit_count++;
@@ -123,11 +122,11 @@ sub on_msg {
 			my $reply = "$response";
 			$reply =~ s/^<$mynick>\s*//;
 			# Send message in UTF8
-			$server->send_message($dst, $reply, 0);
+			$server->send_message($chan_name, $reply, 0);
 			push @{$contexts{$server->{tag}}{$chan_name}}, {role => "assistant", content => "<$mynick> $reply"};
 		}
 	} else {
-		$server->send_message($dst, $res->status_line, 0);
+		$server->send_message($chan_name, $res->status_line, 0);
 		Irssi::print("Anthropic " . $res->status_line . " " . $res->content);
 	}
 }
