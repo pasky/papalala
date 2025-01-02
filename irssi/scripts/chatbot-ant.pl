@@ -9,6 +9,7 @@ use Encode;
 use Irssi;
 use Irssi::Irc;
 use IO::Handle;
+use IPC::Open2;
 use JSON qw(decode_json encode_json);
 
 use vars qw($VERSION %IRSSI);
@@ -92,11 +93,20 @@ sub on_msg {
 	if ($system_prompt eq "PERPLEXITY") {
 		# Python plexsearch mode
 		my $query = join(" | ", map { $_->{content} } @messages) . " <REPLY IN ONE LINE>";
-		my $escaped_query = encode_json($query);
-		Irssi::print("Perplexity: " . $escaped_query);
+		Irssi::print("Perplexity: " . $query);
 		my $key = Irssi::settings_get_str('chatbot_ant_perplexity_key');
-		my $reply = `PERPLEXITY_API_KEY=$key python3 -c 'import json; from plexsearch import perform_search; print(perform_search(json.loads(""" $escaped_query """), show_citations=True))'`;
+
+		my $reply = '';
+		my ($py_out, $py_in);
+		open2($py_out, $py_in, "PERPLEXITY_API_KEY=$key python3 -c 'import sys; from plexsearch import perform_search; print(perform_search(sys.stdin.read(), show_citations=True))'") or die "Failed to open pipe: $!";
+		binmode($py_in, ":utf8");
+		binmode($py_out, ":utf8");
+		print $py_in $query;
+		close($py_in);
+		$reply = do { local $/; <$py_out> };
 		chomp($reply);
+		close($py_out);
+
 		Irssi::print("Reply raw: <" . $reply . ">");
 		$reply =~ s/\n/  /g;
 		$reply =~ s/   */  /g;
