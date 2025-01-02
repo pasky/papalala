@@ -5,6 +5,7 @@ use utf8;
 use strict;
 use warnings;
 
+use Encode;
 use Irssi;
 use Irssi::Irc;
 use IO::Handle;
@@ -36,7 +37,7 @@ sub on_msg {
 
 	$contexts{$server->{tag}} = {} unless defined $contexts{$server->{tag}};
 	$contexts{$server->{tag}}{$chan_name} = [] unless defined $contexts{$server->{tag}}{$chan_name};
-	push @{$contexts{$server->{tag}}{$chan_name}}, {"role" => (lc $nick eq lc $mynick ? "assistant" : "user"), "content" => "<$nick> $msg"};
+	push @{$contexts{$server->{tag}}{$chan_name}}, {"role" => (lc $nick eq lc $mynick ? "assistant" : "user"), "content" => Encode::decode_utf8("<$nick> $msg")};
 	my $h = Irssi::settings_get_int('chatbot_ant_history_size');
 	if (@{$contexts{$server->{tag}}{$chan_name}} > $h) {
 		splice @{$contexts{$server->{tag}}{$chan_name}}, 0, @{$contexts{$server->{tag}}{$chan_name}} - $h;
@@ -121,7 +122,6 @@ sub on_msg {
 			$response =~ s/\n.*//g;
 			my $reply = "$response";
 			$reply =~ s/^<$mynick>\s*//;
-			# Send message in UTF8
 			$server->send_message($chan_name, $reply, 0);
 			push @{$contexts{$server->{tag}}{$chan_name}}, {role => "assistant", content => "<$mynick> $reply"};
 		}
