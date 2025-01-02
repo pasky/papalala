@@ -48,7 +48,9 @@ sub on_msg {
 	}
 
 	my $system_prompt;
-	if ($msg =~ s/^!s\s*//) {
+	if ($msg =~ s/^!p\s*//) {
+		$system_prompt = "PERPLEXITY";
+	} elsif ($msg =~ s/^!s\s*//) {
 		$system_prompt = "You are IRC user $mynick. You are friendly, straight, informal, maybe ironic, but always informative. You will follow up to the last message, address the topic, and provide a ONE-LINE thoughtful and constructive response. Try to helpfully surprise if you can. (V češtině tykáš, but you reply in the same language as the last message. Address whoever was talking to you.)";
 	} else {
 		$system_prompt = "You are IRC user $mynick and you are known for your sharp sarcasm and cynical, dry, rough sense of humor. You are also extremely clever. You will follow up to the last message, play along (address the topic, not the speaker), and say a single surprisingly witty comeback message that makes everyone chuckle. (V češtině tykáš, but you reply in the same language as last message. Address whoever was talking to you.";
@@ -85,6 +87,25 @@ sub on_msg {
 	}
 	if ($messages[0]->{role} ne "user") {
 		unshift @messages, {role => "user", content => "..."};
+	}
+	
+	if ($system_prompt eq "PERPLEXITY") {
+		# Python plexsearch mode
+		my $query = join(" | ", map { $_->{content} } @messages) . " <REPLY IN ONE LINE>";
+		my $escaped_query = encode_json($query);
+		Irssi::print("Perplexity: " . $escaped_query);
+		my $key = Irssi::settings_get_str('chatbot_ant_perplexity_key');
+		my $reply = `PERPLEXITY_API_KEY=$key python3 -c 'import json; from plexsearch import perform_search; print(perform_search(json.loads(""" $escaped_query """), show_citations=True))'`;
+		chomp($reply);
+		Irssi::print("Reply raw: <" . $reply . ">");
+		$reply =~ s/\n/  /g;
+		$reply =~ s/   */  /g;
+		$reply =~ s/References:  *(.*)//g;
+		Irssi::print("Reply final: $chan_name <" . $reply . ">");
+		$server->send_message($chan_name, "$nick: $reply", 0);
+		$server->send_message($chan_name, "$nick: $1", 0);
+		push @{$contexts{$server->{tag}}{$chan_name}}, {role => "assistant", content => "<$mynick> $reply"};
+		return;
 	}
 
 	# HTTP POST to OpenAI API
@@ -140,3 +161,4 @@ Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_ignore', '');
 Irssi::settings_add_int('chatbot_ant', 'chatbot_ant_history_size', 5);
 Irssi::settings_add_int('chatbot_ant', 'chatbot_ant_rate', 30);
 Irssi::settings_add_int('chatbot_ant', 'chatbot_ant_rate_period', 900);
+Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_perplexity_key', '');
