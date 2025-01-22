@@ -89,6 +89,91 @@ sub perplexity_call {
 	return $reply;
 }
 
+sub deepseek_call {
+	my ($server, $chan_name, $nick, $mynick, $context, $system_prompt) = @_;
+	my $ua = LWP::UserAgent->new;
+	$ua->agent("chatbot-ant/$VERSION");
+	$ua->env_proxy;
+	my $req = HTTP::Request->new(POST => Irssi::settings_get_str('chatbot_ant_deepseek_url'));
+	$req->header('Authorization' => 'Bearer ' . Irssi::settings_get_str('chatbot_ant_deepseek_key'));
+	$req->content_encoding('UTF-8');
+	$req->content_type('application/json');
+
+	# Coalesce user messages
+	my @messages;
+	for my $msg (@$context) {
+		if ($msg->{role} eq "user") {
+			if (@messages && $messages[-1]->{role} eq "user") {
+				$messages[-1]->{content} .= "\n" . $msg->{content};
+			} else {
+				push @messages, $msg;
+			}
+		} else {
+			push @messages, $msg;
+		}
+	}
+	if ($messages[0]->{role} ne "user") {
+		unshift @messages, {role => "user", content => "..."};
+	}
+
+	$req->content(encode_json({
+		model => Irssi::settings_get_str('chatbot_ant_deepseek_model'),
+		messages => [
+			{role => "system", content => $system_prompt},
+			@messages
+		],
+		max_tokens => 256,
+		temperature => 0.7,
+	}));
+
+	Irssi::print("DeepSeek request: " . $req->content);
+	my $res = $ua->request($req);
+	if ($res->is_success) {
+		my $json = JSON->new->utf8(1)->decode($res->content);
+		use Data::Dumper;
+		Irssi::print("DeepSeek j: " . Dumper($json));
+		if (defined $json->{choices} && @{$json->{choices}} > 0) {
+			my $response = $json->{choices}[0]{message}{content};
+			$response =~ s/^\s*//g;
+			$response =~ s/\n/|/g;
+			$response =~ s/^<$mynick>\s*//;
+			
+			# Handle reasoning trace if present
+			if (defined $json->{choices}[0]{message}{reasoning_content}) {
+				my $trace_file = join('', map {('a'..'z')[rand 26]} (1..6)) . ".txt";
+				my $trace_dir = Irssi::settings_get_str('chatbot_ant_rtraces_dir');
+				
+				# Create directory if it doesn't exist
+				unless (-d $trace_dir) {
+					mkdir $trace_dir or do {
+						Irssi::print("Failed to create trace directory: $!");
+						return undef;
+					};
+				}
+				
+				# Write reasoning trace
+				if (open(my $fh, '>:utf8', "$trace_dir/$trace_file")) {
+					print $fh $json->{choices}[0]{message}{reasoning_content};
+					close $fh;
+					
+					# Append trace URL to response
+					my $trace_url = Irssi::settings_get_str('chatbot_ant_rtraces_url');
+					$response .= " (" . $trace_url . "/" . $trace_file . ")";
+				} else {
+					Irssi::print("Failed to write reasoning trace: $!");
+				}
+			}
+			
+			$server->send_message($chan_name, $response, 0);
+			return $response;
+		}
+	} else {
+		$server->send_message($chan_name, $res->status_line, 0);
+		Irssi::print("DeepSeek " . $res->status_line . " " . $res->content);
+		return undef;
+	}
+}
+
 sub claude_call {
 	my ($server, $chan_name, $nick, $mynick, $context, $system_prompt) = @_;
 	my $ua = LWP::UserAgent->new;
@@ -175,8 +260,13 @@ sub on_msg {
 		} else {
 			$system_prompt = "You are IRC user $mynick and you are known for your sharp sarcasm and cynical, dry, rough sense of humor. You are also extremely clever. You will follow up to the last message, play along (address the topic, not the speaker), and say a single surprisingly witty comeback message that makes everyone chuckle. (V češtině tykáš, but you reply in the same language as last message. Address whoever was talking to you.";
 		}
-		$reply = claude_call($server, $chan_name, $nick, $mynick,
-				     $contexts{$server->{tag}}{$chan_name}, $system_prompt);
+		if ($cleaned_msg =~ s/^!d\s*//) {
+			$reply = deepseek_call($server, $chan_name, $nick, $mynick,
+						$contexts{$server->{tag}}{$chan_name}, $system_prompt);
+		} else {
+			$reply = claude_call($server, $chan_name, $nick, $mynick,
+					     $contexts{$server->{tag}}{$chan_name}, $system_prompt);
+		}
 	}
 
 	# Update history with response if we got one
@@ -195,3 +285,8 @@ Irssi::settings_add_int('chatbot_ant', 'chatbot_ant_history_size', 5);
 Irssi::settings_add_int('chatbot_ant', 'chatbot_ant_rate', 30);
 Irssi::settings_add_int('chatbot_ant', 'chatbot_ant_rate_period', 900);
 Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_perplexity_key', '');
+Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_deepseek_url', 'https://api.deepseek.com/v1/chat/completions');
+Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_deepseek_key', '');
+Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_rtraces_dir', '/tmp/chatbot-ant-rtraces');
+Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_rtraces_url', 'https://example.com/rtraces');
+Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_deepseek_model', 'deepseek-reasoner');
