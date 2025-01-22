@@ -26,56 +26,83 @@ my %contexts;
 my $ratelimit_time = 0;
 my $ratelimit_count = 0;
 
-sub on_msg {
-	my ($server, $msg, $nick, $address, $target) = @_;
-	my $channel = $server->channel_find($target);
-	my $isprivate = !defined $channel;
-	my $chan_name = $isprivate ? $nick : $channel->{name};
-	my $mynick = $server->{nick};
-	my $request;
+sub update_history {
+	my ($server_tag, $chan_name, $msg, $nick, $mynick, $is_response) = @_;
+	$contexts{$server_tag} = {} unless defined $contexts{$server_tag};
+	$contexts{$server_tag}{$chan_name} = [] unless defined $contexts{$server_tag}{$chan_name};
 
-	return if grep {lc eq lc $nick} split(/ /, Irssi::settings_get_str('chatbot_ant_ignore'));
+	push @{$contexts{$server_tag}{$chan_name}},
+		 {"role" => (lc $nick eq lc $mynick ? "assistant" : "user"),
+		  "content" => Encode::decode_utf8("<$nick> $msg")};
 
-	$contexts{$server->{tag}} = {} unless defined $contexts{$server->{tag}};
-	$contexts{$server->{tag}}{$chan_name} = [] unless defined $contexts{$server->{tag}}{$chan_name};
-	push @{$contexts{$server->{tag}}{$chan_name}}, {"role" => (lc $nick eq lc $mynick ? "assistant" : "user"), "content" => Encode::decode_utf8("<$nick> $msg")};
 	my $h = Irssi::settings_get_int('chatbot_ant_history_size');
-	if (@{$contexts{$server->{tag}}{$chan_name}} > $h) {
-		splice @{$contexts{$server->{tag}}{$chan_name}}, 0, @{$contexts{$server->{tag}}{$chan_name}} - $h;
+	if (@{$contexts{$server_tag}{$chan_name}} > $h) {
+		splice @{$contexts{$server_tag}{$chan_name}}, 0, @{$contexts{$server_tag}{$chan_name}} - $h;
 	}
+}
 
-	if ($msg !~ s/^\s*$mynick[,:]\s*(.*)$/$1/i) {
-		return;
-	}
-
-	my $system_prompt;
-	if ($msg =~ s/^!p\s*//) {
-		$system_prompt = "PERPLEXITY";
-	} elsif ($msg =~ s/^!s\s*//) {
-		$system_prompt = "You are IRC user $mynick. You are friendly, straight, informal, maybe ironic, but always informative. You will follow up to the last message, address the topic, and provide a ONE-LINE thoughtful and constructive response. Try to helpfully surprise if you can. (V češtině tykáš, but you reply in the same language as the last message. Address whoever was talking to you.)";
-	} else {
-		$system_prompt = "You are IRC user $mynick and you are known for your sharp sarcasm and cynical, dry, rough sense of humor. You are also extremely clever. You will follow up to the last message, play along (address the topic, not the speaker), and say a single surprisingly witty comeback message that makes everyone chuckle. (V češtině tykáš, but you reply in the same language as last message. Address whoever was talking to you.";
-	}
-
-	# Simple ratelimiting algorithm - at most x messages per 10 minutes
+sub rate_limit {
+	my ($server, $chan_name, $nick) = @_;
 	my $rate = Irssi::settings_get_int('chatbot_ant_rate');
-	if ($rate > 0) {
-		my $now = time();
-		if ($now < $ratelimit_time) {
-			if ($ratelimit_count >= $rate) {
-				$server->send_message($chan_name, "$nick: Slow down a little, will you? (rate limiting)", 0);
-				return;
-			}
-			$ratelimit_count++;
-		} else {
-			$ratelimit_time = $now + Irssi::settings_get_int('chatbot_ant_rate_period');
-			$ratelimit_count = 0;
-		}
-	}
+	return 1 unless $rate > 0;
 
-	# Coalesce @messages entries with role "user" into a single message
+	my $now = time();
+	if ($now < $ratelimit_time) {
+		if ($ratelimit_count >= $rate) {
+			$server->send_message($chan_name, "$nick: Slow down a little, will you? (rate limiting)", 0);
+			return 0;
+		}
+		$ratelimit_count++;
+	} else {
+		$ratelimit_time = $now + Irssi::settings_get_int('chatbot_ant_rate_period');
+		$ratelimit_count = 0;
+	}
+	return 1;
+}
+
+sub perplexity_call {
+	my ($server, $chan_name, $nick, $mynick, $context) = @_;
+	my $query = join(" | ", map { $_->{content} } @$context) . " <REPLY IN ONE LINE>";
+	Irssi::print("Perplexity: " . $query);
+	my $key = Irssi::settings_get_str('chatbot_ant_perplexity_key');
+
+	my ($py_out, $py_in);
+	open2($py_out, $py_in, "PERPLEXITY_API_KEY=$key python3 -c 'import sys; from plexsearch import perform_search; print(perform_search(sys.stdin.read(), show_citations=True))'") or die "Failed to open pipe: $!";
+	binmode($py_in, ":utf8");
+	binmode($py_out, ":utf8");
+	print $py_in $query;
+	close($py_in);
+	my $reply = do { local $/; <$py_out> };
+	chomp($reply);
+	close($py_out);
+
+	Irssi::print("Reply raw: <" . $reply . ">");
+	$reply =~ s/\n/  /g;
+	$reply =~ s/   */  /g;
+	if ($reply =~ s/References:  *(.*)//g) {
+		my $refs = $1;
+		$server->send_message($chan_name, "$nick: $reply", 0);
+		$server->send_message($chan_name, "$nick: $refs", 0);
+		return $reply;
+	}
+	$server->send_message($chan_name, "$nick: $reply", 0);
+	return $reply;
+}
+
+sub claude_call {
+	my ($server, $chan_name, $nick, $mynick, $context, $system_prompt) = @_;
+	my $ua = LWP::UserAgent->new;
+	$ua->agent("chatbot-ant/$VERSION");
+	$ua->env_proxy;
+	my $req = HTTP::Request->new(POST => Irssi::settings_get_str('chatbot_ant_url'));
+	$req->header('x-api-key' => Irssi::settings_get_str('chatbot_ant_key'));
+	$req->header('anthropic-version' => '2023-06-01');
+	$req->content_encoding('UTF-8');
+	$req->content_type('application/json');
+
+	# Coalesce user messages
 	my @messages;
-	for my $msg (@{$contexts{$server->{tag}}{$chan_name}}) {
+	for my $msg (@$context) {
 		if ($msg->{role} eq "user") {
 			if (@messages && $messages[-1]->{role} eq "user") {
 				$messages[-1]->{content} .= "\n" . $msg->{content};
@@ -89,76 +116,72 @@ sub on_msg {
 	if ($messages[0]->{role} ne "user") {
 		unshift @messages, {role => "user", content => "..."};
 	}
-	
-	if ($system_prompt eq "PERPLEXITY") {
-		# Python plexsearch mode
-		my $query = join(" | ", map { $_->{content} } @messages) . " <REPLY IN ONE LINE>";
-		Irssi::print("Perplexity: " . $query);
-		my $key = Irssi::settings_get_str('chatbot_ant_perplexity_key');
 
-		my $reply = '';
-		my ($py_out, $py_in);
-		open2($py_out, $py_in, "PERPLEXITY_API_KEY=$key python3 -c 'import sys; from plexsearch import perform_search; print(perform_search(sys.stdin.read(), show_citations=True))'") or die "Failed to open pipe: $!";
-		binmode($py_in, ":utf8");
-		binmode($py_out, ":utf8");
-		print $py_in $query;
-		close($py_in);
-		$reply = do { local $/; <$py_out> };
-		chomp($reply);
-		close($py_out);
-
-		Irssi::print("Reply raw: <" . $reply . ">");
-		$reply =~ s/\n/  /g;
-		$reply =~ s/   */  /g;
-		$reply =~ s/References:  *(.*)//g;
-		Irssi::print("Reply final: $chan_name <" . $reply . ">");
-		$server->send_message($chan_name, "$nick: $reply", 0);
-		$server->send_message($chan_name, "$nick: $1", 0);
-		push @{$contexts{$server->{tag}}{$chan_name}}, {role => "assistant", content => "<$mynick> $reply"};
-		return;
-	}
-
-	# HTTP POST to OpenAI API
-	my $ua = LWP::UserAgent->new;
-	$ua->agent("chatbot-ant/$VERSION");
-	$ua->env_proxy;
-	my $req = HTTP::Request->new(POST => Irssi::settings_get_str('chatbot_ant_url'));
-	$req->header('x-api-key' => Irssi::settings_get_str('chatbot_ant_key'));
-	$req->header('anthropic-version' => '2023-06-01');
-	$req->content_encoding('UTF-8');
-	$req->content_type('application/json');
 	$req->content(encode_json({
 		model => Irssi::settings_get_str('chatbot_ant_model'),
 		max_tokens => 256,
 		messages => \@messages,
 		system => $system_prompt,
-		# stop => "\n",
 	}));
 	Irssi::print("Anthropic request: " . $req->content);
 	my $res = $ua->request($req);
 	if ($res->is_success) {
-		Irssi::print("Anthropic response en: " . $res->content);
-		Irssi::print("Anthropic response de: " . $res->decoded_content);
-		Irssi::print("Anthropic response is " . utf8::is_utf8($res->content) . " " . utf8::is_utf8($res->decoded_content));
 		my $json = JSON->new->utf8(1)->decode($res->content);
 		use Data::Dumper;
 		Irssi::print("Anthropic j: " . Dumper($json));
 		if (defined $json->{content}) {
 			my $response = $json->{content}->[0]->{text};
-			Irssi::print("json response is [$response] -> " . utf8::is_utf8($response));
-			Irssi::print("decode: " . utf8::decode($response));
-			Irssi::print("json response decoded: $response -> " . utf8::is_utf8($response));
-			#utf8::upgrade($response);
 			$response =~ s/^\s*//g;
 			$response =~ s/\n.*//g;
-			my $reply = "$response";
-			$reply =~ s/^<$mynick>\s*//;
-			$server->send_message($chan_name, $reply, 0);
-			push @{$contexts{$server->{tag}}{$chan_name}}, {role => "assistant", content => "<$mynick> $reply"};
+			$response =~ s/^<$mynick>\s*//;
+			$server->send_message($chan_name, $response, 0);
+			return $response;
 		}
 	} else {
 		$server->send_message($chan_name, $res->status_line, 0);
 		Irssi::print("Anthropic " . $res->status_line . " " . $res->content);
+		return undef;
+	}
+}
+
+sub on_msg {
+	my ($server, $msg, $nick, $address, $target) = @_;
+	my $channel = $server->channel_find($target);
+	my $isprivate = !defined $channel;
+	my $chan_name = $isprivate ? $nick : $channel->{name};
+	my $mynick = $server->{nick};
+
+	return if grep {lc eq lc $nick} split(/ /, Irssi::settings_get_str('chatbot_ant_ignore'));
+
+	# Check if we should respond and clean up message
+	my $cleaned_msg = $msg;
+	return if $cleaned_msg !~ s/^\s*$mynick[,:]\s*(.*)$/$1/i;
+
+	# Update history before rate limiting to maintain context
+	update_history($server->{tag}, $chan_name, $msg, $nick, $mynick, 0);
+
+	# Check rate limiting
+	return unless rate_limit($server, $chan_name, $nick);
+
+	# Process message and call appropriate API
+	my $reply;
+	if ($cleaned_msg =~ s/^!p\s*//) {
+		$reply = perplexity_call($server, $chan_name, $nick, $mynick,
+					 $contexts{$server->{tag}}{$chan_name});
+	} else {
+		my $system_prompt;
+		if ($cleaned_msg =~ s/^!s\s*//) {
+			$system_prompt = "You are IRC user $mynick. You are friendly, straight, informal, maybe ironic, but always informative. You will follow up to the last message, address the topic, and provide a ONE-LINE thoughtful and constructive response. Try to helpfully surprise if you can. (V češtině tykáš, but you reply in the same language as the last message. Address whoever was talking to you.)";
+		} else {
+			$system_prompt = "You are IRC user $mynick and you are known for your sharp sarcasm and cynical, dry, rough sense of humor. You are also extremely clever. You will follow up to the last message, play along (address the topic, not the speaker), and say a single surprisingly witty comeback message that makes everyone chuckle. (V češtině tykáš, but you reply in the same language as last message. Address whoever was talking to you.";
+		}
+		$reply = claude_call($server, $chan_name, $nick, $mynick,
+				     $contexts{$server->{tag}}{$chan_name}, $system_prompt);
+	}
+
+	# Update history with response if we got one
+	if ($reply) {
+		update_history($server->{tag}, $chan_name, Encode::encode_utf8($reply), $mynick, $mynick, 1);
 	}
 }
 
