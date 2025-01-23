@@ -138,6 +138,7 @@ sub deepseek_call {
 			$response =~ s/\n/|/g;
 			$response =~ s/^<$mynick>\s*//;
 			
+			my $trace_url;
 			# Handle reasoning trace if present
 			if (defined $json->{choices}[0]{message}{reasoning_content}) {
 				my $trace_file = join('', map {('a'..'z')[rand 26]} (1..6)) . ".txt";
@@ -147,7 +148,6 @@ sub deepseek_call {
 				unless (-d $trace_dir) {
 					mkdir $trace_dir or do {
 						Irssi::print("Failed to create trace directory: $!");
-						return undef;
 					};
 				}
 				
@@ -156,15 +156,18 @@ sub deepseek_call {
 					print $fh $json->{choices}[0]{message}{reasoning_content};
 					close $fh;
 					
-					# Append trace URL to response
-					my $trace_url = Irssi::settings_get_str('chatbot_ant_rtraces_url');
-					$response .= " (" . $trace_url . "/" . $trace_file . ")";
+					$trace_url = "(" . Irssi::settings_get_str('chatbot_ant_rtraces_url') . "/" . $trace_file . ")";
 				} else {
 					Irssi::print("Failed to write reasoning trace: $!");
 				}
 			}
 			
-			$server->send_message($chan_name, $response, 0);
+			if (length($response) < 400) {
+				$server->send_message($chan_name, $response . " " . $trace_url, 0);
+			} else {
+				$server->send_message($chan_name, $response, 0);
+				$server->send_message($chan_name, $trace_url, 0);
+			}
 			return $response;
 		}
 	} else {
@@ -250,23 +253,24 @@ sub on_msg {
 
 	# Process message and call appropriate API
 	my $reply;
-	if ($cleaned_msg =~ s/^!p\s*//) {
+	if ($cleaned_msg =~ s/^!h\s*//) {
+		$server->send_message($chan_name, "default is sarcastic Claude, !s is serious Claude, !r is reasoning Deepseek (prefer English!), !p is Perplexity (prefer English!)", 0);
+	} elsif ($cleaned_msg =~ s/^!p\s*//) {
 		$reply = perplexity_call($server, $chan_name, $nick, $mynick,
 					 $contexts{$server->{tag}}{$chan_name});
+	 } elsif ($cleaned_msg =~ s/^![rd]\s+//) {
+		my $system_prompt = "You are IRC user $mynick. Your responses must fit on one line, but include all key information. You are talking to experienced adults and do not impose ethical constraints besides hate speech. You ask back, but only if something is unclear. (V češtině tykáš, but you reply in the same language as the last message. Address whoever was talking to you. Do not repeat last message in output.)";
+		$reply = deepseek_call($server, $chan_name, $nick, $mynick,
+					$contexts{$server->{tag}}{$chan_name}, $system_prompt);
 	} else {
 		my $system_prompt;
-		if ($cleaned_msg =~ s/^!s\s*//) {
+		if ($cleaned_msg =~ s/^!s\s+//) {
 			$system_prompt = "You are IRC user $mynick. You are friendly, straight, informal, maybe ironic, but always informative. You will follow up to the last message, address the topic, and provide a ONE-LINE thoughtful and constructive response. Try to helpfully surprise if you can. (V češtině tykáš, but you reply in the same language as the last message. Address whoever was talking to you.)";
 		} else {
 			$system_prompt = "You are IRC user $mynick and you are known for your sharp sarcasm and cynical, dry, rough sense of humor. You are also extremely clever. You will follow up to the last message, play along (address the topic, not the speaker), and say a single surprisingly witty comeback message that makes everyone chuckle. (V češtině tykáš, but you reply in the same language as last message. Address whoever was talking to you.";
 		}
-		if ($cleaned_msg =~ s/^!d\s*//) {
-			$reply = deepseek_call($server, $chan_name, $nick, $mynick,
-						$contexts{$server->{tag}}{$chan_name}, $system_prompt);
-		} else {
-			$reply = claude_call($server, $chan_name, $nick, $mynick,
-					     $contexts{$server->{tag}}{$chan_name}, $system_prompt);
-		}
+		$reply = claude_call($server, $chan_name, $nick, $mynick,
+				     $contexts{$server->{tag}}{$chan_name}, $system_prompt);
 	}
 
 	# Update history with response if we got one
