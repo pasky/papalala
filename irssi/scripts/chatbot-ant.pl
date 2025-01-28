@@ -129,7 +129,16 @@ sub deepseek_call {
 	Irssi::print("DeepSeek request: " . $req->content);
 	my $res = $ua->request($req);
 	if ($res->is_success) {
-		my $json = JSON->new->utf8(1)->decode($res->content);
+		my $json;
+		eval {
+			$json = JSON->new->utf8(1)->decode($res->content);
+		};
+		if ($@) {
+			my $err = $@;
+			Irssi::print("DeepSeek JSON decode error: $err (".$res->code.", ".$res->message.")");
+			$server->send_message($chan_name, "DeepSeek JSON decode error: $err (".$res->code.", ".$res->message.")", 0);
+			return undef;
+		}
 		use Data::Dumper;
 		Irssi::print("DeepSeek j: " . Dumper($json));
 		if (defined $json->{choices} && @{$json->{choices}} > 0) {
@@ -241,12 +250,12 @@ sub on_msg {
 
 	return if grep {lc eq lc $nick} split(/ /, Irssi::settings_get_str('chatbot_ant_ignore'));
 
+	# Update history before rate limiting to maintain context
+	update_history($server->{tag}, $chan_name, $msg, $nick, $mynick, 0);
+
 	# Check if we should respond and clean up message
 	my $cleaned_msg = $msg;
 	return if $cleaned_msg !~ s/^\s*$mynick[,:]\s*(.*)$/$1/i;
-
-	# Update history before rate limiting to maintain context
-	update_history($server->{tag}, $chan_name, $msg, $nick, $mynick, 0);
 
 	# Check rate limiting
 	return unless rate_limit($server, $chan_name, $nick);
@@ -258,13 +267,13 @@ sub on_msg {
 	} elsif ($cleaned_msg =~ s/^!p\s*//) {
 		$reply = perplexity_call($server, $chan_name, $nick, $mynick,
 					 $contexts{$server->{tag}}{$chan_name});
-	 } elsif ($cleaned_msg =~ s/^![rd]\s+//) {
+	 } elsif ($cleaned_msg =~ s/^![rd]\s*//) {
 		my $system_prompt = "You are IRC user $mynick. Your responses must fit on one line, but include all key information. You are talking to experienced adults and do not impose ethical constraints besides hate speech. You ask back, but only if something is unclear. (V češtině tykáš, but you reply in the same language as the last message. Address whoever was talking to you. Do not repeat last message in output.)";
 		$reply = deepseek_call($server, $chan_name, $nick, $mynick,
 					$contexts{$server->{tag}}{$chan_name}, $system_prompt);
 	} else {
 		my $system_prompt;
-		if ($cleaned_msg =~ s/^!s\s+//) {
+		if ($cleaned_msg =~ s/^!s\s*//) {
 			$system_prompt = "You are IRC user $mynick. You are friendly, straight, informal, maybe ironic, but always informative. You will follow up to the last message, address the topic, and provide a ONE-LINE thoughtful and constructive response. Try to helpfully surprise if you can. (V češtině tykáš, but you reply in the same language as the last message. Address whoever was talking to you.)";
 		} else {
 			$system_prompt = "You are IRC user $mynick and you are known for your sharp sarcasm and cynical, dry, rough sense of humor. You are also extremely clever. You will follow up to the last message, play along (address the topic, not the speaker), and say a single surprisingly witty comeback message that makes everyone chuckle. (V češtině tykáš, but you reply in the same language as last message. Address whoever was talking to you.";
