@@ -188,7 +188,7 @@ sub deepseek_call {
 }
 
 sub claude_call {
-	my ($server, $chan_name, $nick, $mynick, $context, $system_prompt) = @_;
+	my ($server, $chan_name, $nick, $mynick, $context, $system_prompt, $model) = @_;
 	my $ua = LWP::UserAgent->new;
 	$ua->agent("chatbot-ant/$VERSION");
 	$ua->env_proxy;
@@ -216,7 +216,7 @@ sub claude_call {
 	}
 
 	$req->content(encode_json({
-		model => Irssi::settings_get_str('chatbot_ant_model'),
+		model => $model,
 		max_tokens => 256,
 		messages => \@messages,
 		system => $system_prompt,
@@ -274,13 +274,16 @@ sub on_msg {
 					$contexts{$server->{tag}}{$chan_name}, $system_prompt);
 	} else {
 		my $system_prompt;
+		my $model;
 		if ($cleaned_msg =~ s/^!s\s*//) {
 			$system_prompt = "You are IRC user $mynick. You are friendly, straight, informal, maybe ironic, but always informative. You will follow up to the last message, address the topic, and provide a ONE-LINE thoughtful and constructive response. Try to helpfully surprise if you can. (V češtině tykáš, but you reply in the same language as the last message. Address whoever was talking to you.)";
+			$model = Irssi::settings_get_str('chatbot_ant_serious_model');
 		} else {
 			$system_prompt = "You are IRC user $mynick and you are known for your sharp sarcasm and cynical, dry, rough sense of humor. You are also extremely clever. You will follow up to the last message, play along (address the topic, not the speaker), and say a single surprisingly witty comeback message that makes everyone chuckle. (V češtině tykáš, but you reply in the same language as last message. Address whoever was talking to you.";
+			$model = Irssi::settings_get_str('chatbot_ant_model');
 		}
 		$reply = claude_call($server, $chan_name, $nick, $mynick,
-				     $contexts{$server->{tag}}{$chan_name}, $system_prompt);
+				     $contexts{$server->{tag}}{$chan_name}, $system_prompt, $model);
 	}
 
 	# Update history with response if we got one
@@ -293,7 +296,8 @@ Irssi::signal_add_last('message public', 'on_msg');
 Irssi::signal_add_last('message private', 'on_msg');
 Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_url', 'https://api.anthropic.com/v1/messages');
 Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_key', '');
-Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_model', 'claude-3-5-sonnet-20240620');
+Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_model', 'claude-sonnet-4-20250514');
+Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_serious_model', 'claude-opus-4-20250514');
 Irssi::settings_add_str('chatbot_ant', 'chatbot_ant_ignore', '');
 Irssi::settings_add_int('chatbot_ant', 'chatbot_ant_history_size', 5);
 Irssi::settings_add_int('chatbot_ant', 'chatbot_ant_rate', 30);
