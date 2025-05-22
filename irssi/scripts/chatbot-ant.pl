@@ -227,6 +227,24 @@ sub claude_call {
 		my $json = JSON->new->utf8(1)->decode($res->content);
 		use Data::Dumper;
 		Irssi::print("Anthropic j: " . Dumper($json));
+		
+		# Check for refusal
+		if (defined $json->{stop_reason} && $json->{stop_reason} eq 'refusal') {
+			Irssi::print("Anthropic refusal detected, resetting context");
+			# Remove the last user message that caused the refusal
+			if ($context && @$context > 0) {
+				# Find and remove the last user message
+				for (my $i = @$context - 1; $i >= 0; $i--) {
+					if ($context->[$i]->{role} eq 'user') {
+						splice @$context, $i, 1;
+						last;
+					}
+				}
+			}
+			$server->send_message($chan_name, "$nick: refusal, rip", 0);
+			return undef;
+		}
+		
 		if (defined $json->{content}) {
 			my $response = $json->{content}->[0]->{text};
 			$response =~ s/^\s*//g;
