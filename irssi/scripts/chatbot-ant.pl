@@ -62,7 +62,8 @@ sub rate_limit {
 
 sub perplexity_call {
 	my ($server, $chan_name, $nick, $mynick, $context) = @_;
-	my $query = join(" | ", map { $_->{content} } @$context) . " <REPLY IN ONE LINE>";
+	#my $query = join("\n> ", map { $_->{content} } @$context) . " <REPLY IN ONE LINE>";
+	my $query = $context->[-1]->{content} . " <REPLY IN ONE LINE>";
 	Irssi::print("Perplexity: " . $query);
 	my $key = Irssi::settings_get_str('chatbot_ant_perplexity_key');
 
